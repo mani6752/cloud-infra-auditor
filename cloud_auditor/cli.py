@@ -194,13 +194,74 @@ def cleanup():
 
 @cleanup.command("run")
 @click.option("--dry-run/--execute", default=True, help="Dry-run (default) or actually execute cleanup.")
-def cleanup_run(dry_run):
-    """Run cleanup on flagged resources."""
+@click.pass_context
+def cleanup_run(ctx, dry_run):
+    """Run cleanup on flagged resources from the most recent scans."""
+    cache = load_all_results()
+    if not cache:
+        click.echo("No scan results found. Run scan commands first (e.g. 'scan ebs').")
+        return
+
     mode = "DRY RUN" if dry_run else "EXECUTE"
-    click.echo(f"[stub] Cleanup mode: {mode}")
-    if not dry_run:
-        click.confirm("This will delete real resources. Are you sure?", abort=True)
-        click.echo("[stub] Executing cleanup...")
+    click.echo(f"Cleanup mode: {mode}")
+
+    total_items = sum(len(data["items"]) for data in cache.values())
+    if total_items == 0:
+        click.echo("No flagged resources to clean up.")
+        return
+
+    click.echo(f"Found {total_items} flagged resource(s) across {len(cache)} scan type(s):")
+    for scan_type, data in cache.items():
+        for item in data["items"]:
+            click.echo(f"  - [{scan_type}] {item}")
+
+    if dry_run:
+        click.echo("Dry run complete. No resources were deleted. Re-run with --execute to actually delete them.")
+        return
+
+    click.confirm(f"This will permanently delete {total_items} real resource(s). Are you sure?", abort=True)
+
+    client = get_client(
+        "ec2",
+        profile=ctx.obj["profile"],
+        region=ctx.obj["region"],
+        role_arn=ctx.obj["role_arn"],
+    )
+
+    deleted = 0
+    errors = []
+
+    for item in cache.get("ebs", {}).get("items", []):
+        try:
+            client.delete_volume(VolumeId=item["volume_id"])
+            click.echo(f"  Deleted volume {item['volume_id']}")
+            deleted += 1
+        except Exception as e:
+            errors.append(f"volume {item['volume_id']}: {e}")
+
+    for item in cache.get("eip", {}).get("items", []):
+        try:
+            client.release_address(AllocationId=item["allocation_id"])
+            click.echo(f"  Released Elastic IP {item['public_ip']}")
+            deleted += 1
+        except Exception as e:
+            errors.append(f"EIP {item['public_ip']}: {e}")
+
+    ec2_ids = [item["instance_id"] for item in cache.get("ec2", {}).get("items", [])]
+    if ec2_ids:
+        try:
+            client.terminate_instances(InstanceIds=ec2_ids)
+            for iid in ec2_ids:
+                click.echo(f"  Terminated instance {iid}")
+            deleted += len(ec2_ids)
+        except Exception as e:
+            errors.append(f"instances {ec2_ids}: {e}")
+
+    click.echo(f"Cleanup complete: {deleted} resource(s) deleted.")
+    if errors:
+        click.echo(f"{len(errors)} error(s) occurred:")
+        for err in errors:
+            click.echo(f"  - {err}")
 
 
 if __name__ == "__main__":
