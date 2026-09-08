@@ -70,10 +70,59 @@ def scan_eip(ctx):
 
 @scan.command("ec2")
 @click.option("--days", default=14, help="Lookback window in days for CPU utilization.")
+@click.option("--threshold", default=5.0, help="Average CPU%% below which an instance is flagged idle.")
 @click.pass_context
-def scan_ec2(ctx, days):
+def scan_ec2(ctx, days, threshold):
     """Scan for underutilized EC2 instances (low CPU over N days)."""
-    click.echo(f"[stub] region={ctx.obj['region']} profile={ctx.obj['profile']} - scanning EC2 idle over {days} days...")
+    import datetime
+
+    ec2 = get_client(
+        "ec2",
+        profile=ctx.obj["profile"],
+        region=ctx.obj["region"],
+        role_arn=ctx.obj["role_arn"],
+    )
+    cw = get_client(
+        "cloudwatch",
+        profile=ctx.obj["profile"],
+        region=ctx.obj["region"],
+        role_arn=ctx.obj["role_arn"],
+    )
+
+    reservations = ec2.describe_instances(
+        Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+    )["Reservations"]
+    instances = [i for r in reservations for i in r["Instances"]]
+
+    end = datetime.datetime.now(datetime.UTC)
+    start = end - datetime.timedelta(days=days)
+
+    click.echo(f"Checking {len(instances)} running instance(s) over the last {days} day(s), region={ctx.obj['region']}")
+
+    idle = []
+    for inst in instances:
+        instance_id = inst["InstanceId"]
+        stats = cw.get_metric_statistics(
+            Namespace="AWS/EC2",
+            MetricName="CPUUtilization",
+            Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+            StartTime=start,
+            EndTime=end,
+            Period=86400,
+            Statistics=["Average"],
+        )
+        datapoints = stats.get("Datapoints", [])
+        if not datapoints:
+            avg_cpu = 0.0
+        else:
+            avg_cpu = sum(d["Average"] for d in datapoints) / len(datapoints)
+
+        if avg_cpu < threshold:
+            idle.append((instance_id, avg_cpu))
+
+    click.echo(f"Found {len(idle)} idle instance(s) (avg CPU below {threshold}%):")
+    for instance_id, avg_cpu in idle:
+        click.echo(f"  - {instance_id} (avg CPU: {avg_cpu:.2f}%)")
 
 
 @cli.group()
