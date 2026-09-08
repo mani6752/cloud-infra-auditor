@@ -9,6 +9,10 @@ import datetime
 import json
 
 import typer
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
 
 from cloud_auditor.aws_session import get_client
 from cloud_auditor.storage import save_scan_results, load_all_results
@@ -58,9 +62,15 @@ def scan_ebs(ctx: typer.Context):
     )
     volumes = client.describe_volumes()["Volumes"]
     unattached = [v for v in volumes if not v.get("Attachments")]
-    typer.echo(f"Found {len(volumes)} volume(s) total, {len(unattached)} unattached, in region={ctx.obj['region']}")
-    for v in unattached:
-        typer.echo(f"  - {v['VolumeId']} ({v['Size']} GiB, {v['VolumeType']})")
+    console.print(f"Found [bold]{len(volumes)}[/bold] volume(s) total, [bold red]{len(unattached)}[/bold red] unattached, in region={ctx.obj['region']}")
+    if unattached:
+        table = Table(title="Unattached EBS Volumes")
+        table.add_column("Volume ID", style="cyan")
+        table.add_column("Size (GiB)", justify="right")
+        table.add_column("Type")
+        for v in unattached:
+            table.add_row(v["VolumeId"], str(v["Size"]), v["VolumeType"])
+        console.print(table)
 
     save_scan_results("ebs", ctx.obj["region"], [
         {"volume_id": v["VolumeId"], "size_gib": v["Size"], "volume_type": v["VolumeType"]}
@@ -79,9 +89,14 @@ def scan_eip(ctx: typer.Context):
     )
     addresses = client.describe_addresses()["Addresses"]
     unassociated = [a for a in addresses if not a.get("AssociationId")]
-    typer.echo(f"Found {len(addresses)} Elastic IP(s) total, {len(unassociated)} unassociated, in region={ctx.obj['region']}")
-    for a in unassociated:
-        typer.echo(f"  - {a.get('PublicIp')} (allocation: {a.get('AllocationId', 'n/a')})")
+    console.print(f"Found [bold]{len(addresses)}[/bold] Elastic IP(s) total, [bold red]{len(unassociated)}[/bold red] unassociated, in region={ctx.obj['region']}")
+    if unassociated:
+        table = Table(title="Unassociated Elastic IPs")
+        table.add_column("Public IP", style="cyan")
+        table.add_column("Allocation ID")
+        for a in unassociated:
+            table.add_row(str(a.get("PublicIp")), str(a.get("AllocationId", "n/a")))
+        console.print(table)
 
     save_scan_results("eip", ctx.obj["region"], [
         {"public_ip": a.get("PublicIp"), "allocation_id": a.get("AllocationId")}
@@ -137,9 +152,14 @@ def scan_ec2(
         if avg_cpu < threshold:
             idle.append((instance_id, avg_cpu))
 
-    typer.echo(f"Found {len(idle)} idle instance(s) (avg CPU below {threshold}%):")
-    for instance_id, avg_cpu in idle:
-        typer.echo(f"  - {instance_id} (avg CPU: {avg_cpu:.2f}%)")
+    console.print(f"Found [bold red]{len(idle)}[/bold red] idle instance(s) (avg CPU below {threshold}%):")
+    if idle:
+        table = Table(title="Idle EC2 Instances")
+        table.add_column("Instance ID", style="cyan")
+        table.add_column("Avg CPU %", justify="right")
+        for instance_id, avg_cpu in idle:
+            table.add_row(instance_id, f"{avg_cpu:.2f}")
+        console.print(table)
 
     save_scan_results("ec2", ctx.obj["region"], [
         {"instance_id": instance_id, "avg_cpu_percent": round(avg_cpu, 2)}
