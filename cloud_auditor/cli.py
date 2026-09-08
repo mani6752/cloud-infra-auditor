@@ -1,26 +1,43 @@
 """
 Cloud Infrastructure Auditor & Cost Optimizer CLI.
 
-Entry point and command routing structure.
+Entry point and command routing structure (built on Typer).
 """
 
-import click
+import csv
+import datetime
 import json
+
+import typer
 
 from cloud_auditor.aws_session import get_client
 from cloud_auditor.storage import save_scan_results, load_all_results
 
+app = typer.Typer(help="Cloud Infrastructure Auditor & Cost Optimizer.")
+scan_app = typer.Typer(help="Scan cloud infrastructure for wasteful or misconfigured resources.")
+report_app = typer.Typer(help="Generate or export audit reports.")
+cleanup_app = typer.Typer(help="Clean up flagged resources (requires confirmation).")
 
-@click.group()
-@click.version_option(version="0.1.0")
-@click.option("--profile", default=None, help="AWS named profile to use.")
-@click.option("--region", default="us-east-1", help="AWS region to operate in.")
-@click.option("--role-arn", default=None, help="Optional IAM role ARN to assume.")
-@click.pass_context
-def cli(ctx, profile, region, role_arn):
+app.add_typer(scan_app, name="scan")
+app.add_typer(report_app, name="report")
+app.add_typer(cleanup_app, name="cleanup")
+
+
+def version_callback(value: bool):
+    if value:
+        typer.echo("0.1.0")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    ctx: typer.Context,
+    profile: str = typer.Option(None, help="AWS named profile to use."),
+    region: str = typer.Option("us-east-1", help="AWS region to operate in."),
+    role_arn: str = typer.Option(None, help="Optional IAM role ARN to assume."),
+    version: bool = typer.Option(False, "--version", callback=version_callback, is_eager=True, help="Show the version and exit."),
+):
     """
-    Cloud Infrastructure Auditor & Cost Optimizer.
-
     Scans AWS/GCP infrastructure for orphaned, underutilized, or
     misconfigured resources and generates cost-saving reports.
     """
@@ -30,15 +47,8 @@ def cli(ctx, profile, region, role_arn):
     ctx.obj["role_arn"] = role_arn
 
 
-@cli.group()
-def scan():
-    """Scan cloud infrastructure for wasteful or misconfigured resources."""
-    pass
-
-
-@scan.command("ebs")
-@click.pass_context
-def scan_ebs(ctx):
+@scan_app.command("ebs")
+def scan_ebs(ctx: typer.Context):
     """Scan for unattached EBS volumes."""
     client = get_client(
         "ec2",
@@ -48,9 +58,9 @@ def scan_ebs(ctx):
     )
     volumes = client.describe_volumes()["Volumes"]
     unattached = [v for v in volumes if not v.get("Attachments")]
-    click.echo(f"Found {len(volumes)} volume(s) total, {len(unattached)} unattached, in region={ctx.obj['region']}")
+    typer.echo(f"Found {len(volumes)} volume(s) total, {len(unattached)} unattached, in region={ctx.obj['region']}")
     for v in unattached:
-        click.echo(f"  - {v['VolumeId']} ({v['Size']} GiB, {v['VolumeType']})")
+        typer.echo(f"  - {v['VolumeId']} ({v['Size']} GiB, {v['VolumeType']})")
 
     save_scan_results("ebs", ctx.obj["region"], [
         {"volume_id": v["VolumeId"], "size_gib": v["Size"], "volume_type": v["VolumeType"]}
@@ -58,9 +68,8 @@ def scan_ebs(ctx):
     ])
 
 
-@scan.command("eip")
-@click.pass_context
-def scan_eip(ctx):
+@scan_app.command("eip")
+def scan_eip(ctx: typer.Context):
     """Scan for unassociated Elastic IPs."""
     client = get_client(
         "ec2",
@@ -70,9 +79,9 @@ def scan_eip(ctx):
     )
     addresses = client.describe_addresses()["Addresses"]
     unassociated = [a for a in addresses if not a.get("AssociationId")]
-    click.echo(f"Found {len(addresses)} Elastic IP(s) total, {len(unassociated)} unassociated, in region={ctx.obj['region']}")
+    typer.echo(f"Found {len(addresses)} Elastic IP(s) total, {len(unassociated)} unassociated, in region={ctx.obj['region']}")
     for a in unassociated:
-        click.echo(f"  - {a.get('PublicIp')} (allocation: {a.get('AllocationId', 'n/a')})")
+        typer.echo(f"  - {a.get('PublicIp')} (allocation: {a.get('AllocationId', 'n/a')})")
 
     save_scan_results("eip", ctx.obj["region"], [
         {"public_ip": a.get("PublicIp"), "allocation_id": a.get("AllocationId")}
@@ -80,14 +89,13 @@ def scan_eip(ctx):
     ])
 
 
-@scan.command("ec2")
-@click.option("--days", default=14, help="Lookback window in days for CPU utilization.")
-@click.option("--threshold", default=5.0, help="Average CPU%% below which an instance is flagged idle.")
-@click.pass_context
-def scan_ec2(ctx, days, threshold):
+@scan_app.command("ec2")
+def scan_ec2(
+    ctx: typer.Context,
+    days: int = typer.Option(14, help="Lookback window in days for CPU utilization."),
+    threshold: float = typer.Option(5.0, help="Average CPU%% below which an instance is flagged idle."),
+):
     """Scan for underutilized EC2 instances (low CPU over N days)."""
-    import datetime
-
     ec2 = get_client(
         "ec2",
         profile=ctx.obj["profile"],
@@ -109,7 +117,7 @@ def scan_ec2(ctx, days, threshold):
     end = datetime.datetime.now(datetime.UTC)
     start = end - datetime.timedelta(days=days)
 
-    click.echo(f"Checking {len(instances)} running instance(s) over the last {days} day(s), region={ctx.obj['region']}")
+    typer.echo(f"Checking {len(instances)} running instance(s) over the last {days} day(s), region={ctx.obj['region']}")
 
     idle = []
     for inst in instances:
@@ -124,17 +132,14 @@ def scan_ec2(ctx, days, threshold):
             Statistics=["Average"],
         )
         datapoints = stats.get("Datapoints", [])
-        if not datapoints:
-            avg_cpu = 0.0
-        else:
-            avg_cpu = sum(d["Average"] for d in datapoints) / len(datapoints)
+        avg_cpu = (sum(d["Average"] for d in datapoints) / len(datapoints)) if datapoints else 0.0
 
         if avg_cpu < threshold:
             idle.append((instance_id, avg_cpu))
 
-    click.echo(f"Found {len(idle)} idle instance(s) (avg CPU below {threshold}%):")
+    typer.echo(f"Found {len(idle)} idle instance(s) (avg CPU below {threshold}%):")
     for instance_id, avg_cpu in idle:
-        click.echo(f"  - {instance_id} (avg CPU: {avg_cpu:.2f}%)")
+        typer.echo(f"  - {instance_id} (avg CPU: {avg_cpu:.2f}%)")
 
     save_scan_results("ec2", ctx.obj["region"], [
         {"instance_id": instance_id, "avg_cpu_percent": round(avg_cpu, 2)}
@@ -142,22 +147,19 @@ def scan_ec2(ctx, days, threshold):
     ])
 
 
-@cli.group()
-def report():
-    """Generate or export audit reports."""
-    pass
-
-
-@report.command("export")
-@click.option("--format", "fmt", type=click.Choice(["csv", "json"]), default="json", help="Export format.")
-@click.option("--output", default="report", help="Output file name (without extension).")
-def report_export(fmt, output):
+@report_app.command("export")
+def report_export(
+    fmt: str = typer.Option("json", "--format", help="Export format: csv or json."),
+    output: str = typer.Option("report", help="Output file name (without extension)."),
+):
     """Export the most recent scan results as CSV or JSON."""
-    import csv
+    if fmt not in ("csv", "json"):
+        typer.echo("--format must be 'csv' or 'json'")
+        raise typer.Exit(code=1)
 
     cache = load_all_results()
     if not cache:
-        click.echo("No scan results found. Run a scan command first (e.g. 'scan ebs').")
+        typer.echo("No scan results found. Run a scan command first (e.g. 'scan ebs').")
         return
 
     filename = f"{output}.{fmt}"
@@ -174,7 +176,7 @@ def report_export(fmt, output):
                 rows.append(row)
 
         if not rows:
-            click.echo("No scan results to export.")
+            typer.echo("No scan results to export.")
             return
 
         fieldnames = sorted({key for row in rows for key in row.keys()})
@@ -183,43 +185,39 @@ def report_export(fmt, output):
             writer.writeheader()
             writer.writerows(rows)
 
-    click.echo(f"Exported {sum(len(d['items']) for d in cache.values())} finding(s) across {len(cache)} scan type(s) to {filename}")
+    typer.echo(f"Exported {sum(len(d['items']) for d in cache.values())} finding(s) across {len(cache)} scan type(s) to {filename}")
 
 
-@cli.group()
-def cleanup():
-    """Clean up flagged resources (requires confirmation)."""
-    pass
-
-
-@cleanup.command("run")
-@click.option("--dry-run/--execute", default=True, help="Dry-run (default) or actually execute cleanup.")
-@click.pass_context
-def cleanup_run(ctx, dry_run):
+@cleanup_app.command("run")
+def cleanup_run(
+    ctx: typer.Context,
+    execute: bool = typer.Option(False, "--execute/--dry-run", help="Actually execute cleanup (default: dry-run)."),
+):
     """Run cleanup on flagged resources from the most recent scans."""
+    dry_run = not execute
     cache = load_all_results()
     if not cache:
-        click.echo("No scan results found. Run scan commands first (e.g. 'scan ebs').")
+        typer.echo("No scan results found. Run scan commands first (e.g. 'scan ebs').")
         return
 
     mode = "DRY RUN" if dry_run else "EXECUTE"
-    click.echo(f"Cleanup mode: {mode}")
+    typer.echo(f"Cleanup mode: {mode}")
 
     total_items = sum(len(data["items"]) for data in cache.values())
     if total_items == 0:
-        click.echo("No flagged resources to clean up.")
+        typer.echo("No flagged resources to clean up.")
         return
 
-    click.echo(f"Found {total_items} flagged resource(s) across {len(cache)} scan type(s):")
+    typer.echo(f"Found {total_items} flagged resource(s) across {len(cache)} scan type(s):")
     for scan_type, data in cache.items():
         for item in data["items"]:
-            click.echo(f"  - [{scan_type}] {item}")
+            typer.echo(f"  - [{scan_type}] {item}")
 
     if dry_run:
-        click.echo("Dry run complete. No resources were deleted. Re-run with --execute to actually delete them.")
+        typer.echo("Dry run complete. No resources were deleted. Re-run with --execute to actually delete them.")
         return
 
-    click.confirm(f"This will permanently delete {total_items} real resource(s). Are you sure?", abort=True)
+    typer.confirm(f"This will permanently delete {total_items} real resource(s). Are you sure?", abort=True)
 
     client = get_client(
         "ec2",
@@ -234,7 +232,7 @@ def cleanup_run(ctx, dry_run):
     for item in cache.get("ebs", {}).get("items", []):
         try:
             client.delete_volume(VolumeId=item["volume_id"])
-            click.echo(f"  Deleted volume {item['volume_id']}")
+            typer.echo(f"  Deleted volume {item['volume_id']}")
             deleted += 1
         except Exception as e:
             errors.append(f"volume {item['volume_id']}: {e}")
@@ -242,7 +240,7 @@ def cleanup_run(ctx, dry_run):
     for item in cache.get("eip", {}).get("items", []):
         try:
             client.release_address(AllocationId=item["allocation_id"])
-            click.echo(f"  Released Elastic IP {item['public_ip']}")
+            typer.echo(f"  Released Elastic IP {item['public_ip']}")
             deleted += 1
         except Exception as e:
             errors.append(f"EIP {item['public_ip']}: {e}")
@@ -252,17 +250,17 @@ def cleanup_run(ctx, dry_run):
         try:
             client.terminate_instances(InstanceIds=ec2_ids)
             for iid in ec2_ids:
-                click.echo(f"  Terminated instance {iid}")
+                typer.echo(f"  Terminated instance {iid}")
             deleted += len(ec2_ids)
         except Exception as e:
             errors.append(f"instances {ec2_ids}: {e}")
 
-    click.echo(f"Cleanup complete: {deleted} resource(s) deleted.")
+    typer.echo(f"Cleanup complete: {deleted} resource(s) deleted.")
     if errors:
-        click.echo(f"{len(errors)} error(s) occurred:")
+        typer.echo(f"{len(errors)} error(s) occurred:")
         for err in errors:
-            click.echo(f"  - {err}")
+            typer.echo(f"  - {err}")
 
 
 if __name__ == "__main__":
-    cli()
+    app()
