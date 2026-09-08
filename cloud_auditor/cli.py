@@ -5,8 +5,10 @@ Entry point and command routing structure.
 """
 
 import click
+import json
 
 from cloud_auditor.aws_session import get_client
+from cloud_auditor.storage import save_scan_results, load_all_results
 
 
 @click.group()
@@ -50,6 +52,11 @@ def scan_ebs(ctx):
     for v in unattached:
         click.echo(f"  - {v['VolumeId']} ({v['Size']} GiB, {v['VolumeType']})")
 
+    save_scan_results("ebs", ctx.obj["region"], [
+        {"volume_id": v["VolumeId"], "size_gib": v["Size"], "volume_type": v["VolumeType"]}
+        for v in unattached
+    ])
+
 
 @scan.command("eip")
 @click.pass_context
@@ -66,6 +73,11 @@ def scan_eip(ctx):
     click.echo(f"Found {len(addresses)} Elastic IP(s) total, {len(unassociated)} unassociated, in region={ctx.obj['region']}")
     for a in unassociated:
         click.echo(f"  - {a.get('PublicIp')} (allocation: {a.get('AllocationId', 'n/a')})")
+
+    save_scan_results("eip", ctx.obj["region"], [
+        {"public_ip": a.get("PublicIp"), "allocation_id": a.get("AllocationId")}
+        for a in unassociated
+    ])
 
 
 @scan.command("ec2")
@@ -124,6 +136,11 @@ def scan_ec2(ctx, days, threshold):
     for instance_id, avg_cpu in idle:
         click.echo(f"  - {instance_id} (avg CPU: {avg_cpu:.2f}%)")
 
+    save_scan_results("ec2", ctx.obj["region"], [
+        {"instance_id": instance_id, "avg_cpu_percent": round(avg_cpu, 2)}
+        for instance_id, avg_cpu in idle
+    ])
+
 
 @cli.group()
 def report():
@@ -136,7 +153,37 @@ def report():
 @click.option("--output", default="report", help="Output file name (without extension).")
 def report_export(fmt, output):
     """Export the most recent scan results as CSV or JSON."""
-    click.echo(f"[stub] Exporting report as {fmt} to {output}.{fmt}...")
+    import csv
+
+    cache = load_all_results()
+    if not cache:
+        click.echo("No scan results found. Run a scan command first (e.g. 'scan ebs').")
+        return
+
+    filename = f"{output}.{fmt}"
+
+    if fmt == "json":
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+    else:
+        rows = []
+        for scan_type, data in cache.items():
+            for item in data["items"]:
+                row = {"scan_type": scan_type, "region": data["region"], "scanned_at": data["scanned_at"]}
+                row.update(item)
+                rows.append(row)
+
+        if not rows:
+            click.echo("No scan results to export.")
+            return
+
+        fieldnames = sorted({key for row in rows for key in row.keys()})
+        with open(filename, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    click.echo(f"Exported {sum(len(d['items']) for d in cache.values())} finding(s) across {len(cache)} scan type(s) to {filename}")
 
 
 @cli.group()

@@ -6,3 +6,10 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+
+# Local report exports and scan cache
+my_report.json
+my_report.csv
+*.report.json
+*.report.csv
+.cloud_auditor_cache.json
