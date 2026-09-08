@@ -16,6 +16,7 @@ console = Console()
 
 from cloud_auditor.aws_session import get_client
 from cloud_auditor.storage import save_scan_results, load_all_results
+from cloud_auditor.aws_utils import is_valid_region, with_backoff
 
 app = typer.Typer(help="Cloud Infrastructure Auditor & Cost Optimizer.")
 scan_app = typer.Typer(help="Scan cloud infrastructure for wasteful or misconfigured resources.")
@@ -50,6 +51,10 @@ def main(
     ctx.obj["region"] = region
     ctx.obj["role_arn"] = role_arn
 
+    if not is_valid_region(region):
+        typer.echo(f"'{region}' is not a recognized AWS region. Run with a valid region, e.g. us-east-1, eu-west-1, ap-southeast-2.")
+        raise typer.Exit(code=1)
+
 
 @scan_app.command("ebs")
 def scan_ebs(ctx: typer.Context):
@@ -60,7 +65,10 @@ def scan_ebs(ctx: typer.Context):
         region=ctx.obj["region"],
         role_arn=ctx.obj["role_arn"],
     )
-    volumes = client.describe_volumes()["Volumes"]
+    @with_backoff()
+    def _describe_volumes():
+        return client.describe_volumes()["Volumes"]
+    volumes = _describe_volumes()
     unattached = [v for v in volumes if not v.get("Attachments")]
     console.print(f"Found [bold]{len(volumes)}[/bold] volume(s) total, [bold red]{len(unattached)}[/bold red] unattached, in region={ctx.obj['region']}")
     if unattached:
@@ -87,7 +95,10 @@ def scan_eip(ctx: typer.Context):
         region=ctx.obj["region"],
         role_arn=ctx.obj["role_arn"],
     )
-    addresses = client.describe_addresses()["Addresses"]
+    @with_backoff()
+    def _describe_addresses():
+        return client.describe_addresses()["Addresses"]
+    addresses = _describe_addresses()
     unassociated = [a for a in addresses if not a.get("AssociationId")]
     console.print(f"Found [bold]{len(addresses)}[/bold] Elastic IP(s) total, [bold red]{len(unassociated)}[/bold red] unassociated, in region={ctx.obj['region']}")
     if unassociated:
@@ -124,9 +135,12 @@ def scan_ec2(
         role_arn=ctx.obj["role_arn"],
     )
 
-    reservations = ec2.describe_instances(
-        Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
-    )["Reservations"]
+    @with_backoff()
+    def _describe_instances():
+        return ec2.describe_instances(
+            Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+        )["Reservations"]
+    reservations = _describe_instances()
     instances = [i for r in reservations for i in r["Instances"]]
 
     end = datetime.datetime.now(datetime.UTC)
