@@ -13,3 +13,5 @@ my_report.csv
 *.report.json
 *.report.csv
 .cloud_auditor_cache.json
+cloud-auditor.spec
+*.egg-info/
